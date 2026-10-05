@@ -41,14 +41,34 @@ Config.DoctorModels = {
     "cs_creoledoctor",
 }
 
--- Revive anim played when doctor reaches player (scenario system disabled)
+-- Revive treatment: real RDO medical interaction (scenario system disabled).
+-- Case-study sources (RedM-AI-Knowledge-Brain):
+--   mech_revive@mp@crouched|normal|action = revive_l_front/_left/_r_front/_r_right (MP revive set)
+--   mech_revive@unapproved = syringe_revive, revive (SP fallback)
+--   script_common@other@unapproved = medic_kneel_enter, medic_kneel_base
+--   anim_events = joaat("give_meds") / joaat("med_or_suck") are EVENTS, not dicts
+--   RDRO_DV_Sounds = { "Revive" }
 Config.TreatScenario = nil
 Config.TreatScenarioFallback = nil
+Config.TreatAnim = nil -- legacy single-anim slot, superseded below
 
-Config.TreatAnim = {
-    dict = "amb_work@world_human_crouch_inspect@male_a@idle_a",
-    anim = "idle_a",
-    flag = 1
+Config.TreatKneel = {
+    dict = "script_common@other@unapproved",
+    enter = "medic_kneel_enter",
+    base = "medic_kneel_base",
+}
+
+Config.TreatRevive = {
+    dict = "mech_revive@mp@crouched", -- crouched fits the 1.2m kneel-close
+    clips = { "revive_l_front", "revive_l_left", "revive_r_front", "revive_r_right" },
+    event = "give_meds",              -- anim event to listen for via HasAnimEventFired
+    fallbackDict = "mech_revive@unapproved",
+    fallbackClip = "revive",
+}
+
+Config.TreatSound = {
+    set = "RDRO_DV_Sounds",
+    sound = "Revive",
 }
 
 -- Revive

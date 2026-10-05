@@ -259,6 +259,104 @@ local function UpdateDeathCam()
 end
 
 -- ============================================================
+-- RDO-style treat sequence (case-studied, no guessed anims):
+--   kneel enter -> directional MP revive clip -> give_meds event -> Revive sound
+-- ============================================================
+local function PickReviveClip(medic, patient)
+    local cfg = Config.TreatRevive
+    local clips = cfg and cfg.clips or { "revive_l_front" }
+    local front, left, rfront, rright = clips[1], clips[2], clips[3], clips[4]
+    -- best-effort directional pick from real RDO clip set:
+    -- dot  = medic in front of patient? cross = which side?
+    local ok, pick = pcall(function()
+        local mc, pc = GetEntityCoords(medic), GetEntityCoords(patient)
+        local dx, dy = mc.x - pc.x, mc.y - pc.y
+        local len = math.sqrt(dx * dx + dy * dy)
+        if len < 0.05 then return front end
+        dx, dy = dx / len, dy / len
+        local fx, fy = 0.0, 1.0
+        pcall(function()
+            local f = GetEntityForwardVector(patient)
+            if f and (f.x ~= 0 or f.y ~= 0) then fx, fy = f.x, f.y end
+        end)
+        local dot = fx * dx + fy * dy
+        local cross = fx * dy - fy * dx -- >0 medic on patient's left
+        if dot > 0.3 then
+            return (cross >= 0) and front or (rfront or front)
+        else
+            return (cross >= 0) and (left or front) or (rright or front)
+        end
+    end)
+    if ok and pick then return pick end
+    return front
+end
+
+local function PlayTreatSequence(medic, patient)
+    local kneel = Config.TreatKneel
+    local rev = Config.TreatRevive
+    if not rev or not rev.dict then return false end
+
+    -- 1. kneel beside body (real kneel enter, then base loop as settle beat)
+    if kneel and kneel.dict and LoadAnimDict(kneel.dict) then
+        if kneel.enter then
+            pcall(TaskPlayAnim, medic, kneel.dict, kneel.enter, 8.0, -8.0, 1500, 0, 0, false, false, false)
+            Wait(1500)
+        end
+        if kneel.base then
+            pcall(TaskPlayAnim, medic, kneel.dict, kneel.base, 8.0, -8.0, -1, 1, 0, false, false, false)
+            Wait(1000)
+        end
+    end
+    if not isDead or not DoesEntityExist(medic) then return false end
+    ClearPedTasks(medic)
+
+    -- 2. directional RDO revive clip (crouched set; SP set as honest fallback)
+    local clip = PickReviveClip(medic, patient)
+    local dict = rev.dict
+    if not LoadAnimDict(dict) then
+        dict = rev.fallbackDict or "mech_revive@unapproved"
+        clip = rev.fallbackClip or "revive"
+        if not LoadAnimDict(dict) then return false end
+    end
+    Dbg(("treat clip %s:%s"):format(dict, clip))
+    pcall(TaskPlayAnim, medic, dict, clip, 8.0, -8.0, -1, 0, 0, false, false, false)
+
+    -- 3. wait for the real give_meds anim event; sound fires ON the event.
+    --    60%-mark timed fallback so a missing event mapping never soft-locks.
+    local evHash = joaat(rev.event or "give_meds")
+    local snd = Config.TreatSound
+    local soundPlayed = false
+    local function PlayReviveSound()
+        if soundPlayed then return end
+        soundPlayed = true
+        if snd and snd.sound and snd.set then
+            pcall(PlaySoundFrontend, snd.sound, snd.set, true, 0)
+        end
+    end
+    local total = Config.TreatTimeMs or 6000
+    local t0 = GetGameTimer()
+    local fallbackAt = t0 + math.floor(total * 0.6)
+    while GetGameTimer() - t0 < total and isDead do
+        Wait(0)
+        medicDist = 0 -- UI: "treating"
+        if not DoesEntityExist(medic) then break end
+        local okF, fired = pcall(HasAnimEventFired, medic, evHash)
+        if okF and fired then
+            Dbg("give_meds event fired - playing Revive sound")
+            PlayReviveSound()
+            -- let the clip finish its tail after the event
+            Wait(1200)
+            break
+        end
+        if not soundPlayed and GetGameTimer() >= fallbackAt then
+            Dbg("give_meds not observed - fallback sound timing")
+            PlayReviveSound()
+        end
+    end
+    return true
+end
+
+-- ============================================================
 -- Medic dispatch: spawn doctor NPC -> walk to player -> treat -> revive
 -- ============================================================
 local function DispatchMedic()
@@ -430,39 +528,27 @@ AddEventHandler("coi_med_rev:doRevive", function(canRevive)
                 pcall(SetEntityCoords, medicPed, nx, ny, pc.z, false, false, false, false)
             end
 
-            -- face player, then play crouch-inspect ANIM (no scenario system)
+            -- face body, then RDO-style treat sequence (kneel -> revive clip -> event -> sound)
             TaskTurnPedToFaceEntity(medicPed, playerPed, 1500)
             Wait(1500)
 
-            local anim = Config.TreatAnim
-            local animOk = false
-            if anim and anim.dict and anim.anim then
-                if LoadAnimDict(anim.dict) then
-                    pcall(TaskPlayAnim, medicPed, anim.dict, anim.anim, 8.0, -8.0, -1, anim.flag or 1, 0, false, false, false)
-                    animOk = true
+            local seqOk = PlayTreatSequence(medicPed, playerPed)
+            if not seqOk then
+                -- honest fallbacks only: legacy single anim, then scenario, then plain wait
+                local legacy = Config.TreatAnim
+                if legacy and legacy.dict and legacy.anim and LoadAnimDict(legacy.dict) then
+                    pcall(TaskPlayAnim, medicPed, legacy.dict, legacy.anim, 8.0, -8.0, -1, legacy.flag or 1, 0, false, false, false)
+                elseif Config.TreatScenario then
+                    pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenario), -1, true, false, false, false)
+                elseif Config.TreatScenarioFallback then
+                    pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenarioFallback), -1, true, false, false, false)
                 end
-            end
-            -- optional scenario fallback (both nil by default = anim only)
-            if not animOk and Config.TreatScenario then
-                pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenario), -1, true, false, false, false)
-            elseif not animOk and Config.TreatScenarioFallback then
-                pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenarioFallback), -1, true, false, false, false)
-            end
-            Wait(1500)
-
-            local treatUntil = GetGameTimer() + Config.TreatTimeMs
-            while GetGameTimer() < treatUntil and isDead do
-                Wait(500)
-                -- keep medicDist pinned near 0 so UI shows "treating"
-                medicDist = 0
-                if not DoesEntityExist(medicPed) then break end
-                -- keep anim looping (engine can drop it on collision/pathing)
-                if animOk and anim and anim.dict and anim.anim then
-                    local playing = false
-                    pcall(function() playing = IsEntityPlayingAnim(medicPed, anim.dict, anim.anim, 3) end)
-                    if not playing then
-                        pcall(TaskPlayAnim, medicPed, anim.dict, anim.anim, 8.0, -8.0, -1, anim.flag or 1, 0, false, false, false)
-                    end
+                Wait(1500)
+                local treatUntil = GetGameTimer() + Config.TreatTimeMs
+                while GetGameTimer() < treatUntil and isDead do
+                    Wait(500)
+                    medicDist = 0
+                    if not DoesEntityExist(medicPed) then break end
                 end
             end
 
@@ -644,6 +730,61 @@ RegisterCommand("medicdebug", function()
     end
     print(("[coi_med_rev] deathCam=%s enabled=%s"):format(
         tostring(deathCam), tostring(Config.DeathCam and Config.DeathCam.Enabled)))
+end, false)
+
+-- /medicanimtest [1-4]: spawns a test doctor 3m ahead and plays the REAL
+-- RDO revive set back-to-back (kneel enter/base, then each revive_* clip).
+-- Use it to judge which angle suits your server before changing defaults.
+RegisterCommand("medicanimtest", function(_, args)
+    CreateThread(function()
+        local playerPed = PlayerPedId()
+        local pc = GetEntityCoords(playerPed)
+        local model = LoadModel(Config.DoctorModels[1] or "u_m_m_valdoctor_01")
+        if not model then print("[coi_med_rev] medicanimtest: model load failed") return end
+        local fx, fy = 0.0, 1.0
+        pcall(function()
+            local f = GetEntityForwardVector(playerPed)
+            if f then fx, fy = f.x, f.y end
+        end)
+        local sx, sy = pc.x + fx * 3.0, pc.y + fy * 3.0
+        local testPed = CreatePed(model, sx, sy, pc.z, 0.0, false, false, false, false)
+        SetModelAsNoLongerNeeded(model)
+        if not DoesEntityExist(testPed) then print("[coi_med_rev] medicanimtest: spawn failed") return end
+        pcall(SetEntityInvincible, testPed, true)
+        SetBlockingOfNonTemporaryEvents(testPed, true)
+        local face = GetEntityHeading(playerPed)
+        pcall(SetEntityHeading, testPed, (face + 180.0) % 360.0)
+
+        local only = tonumber(args and args[1] or nil)
+        local k = Config.TreatKneel
+        if k and k.dict and LoadAnimDict(k.dict) then
+            if k.enter then
+                print(("[coi_med_rev] playing %s:%s"):format(k.dict, k.enter))
+                pcall(TaskPlayAnim, testPed, k.dict, k.enter, 8.0, -8.0, 1500, 0, 0, false, false, false)
+                Wait(1800)
+            end
+            if k.base then
+                print(("[coi_med_rev] playing %s:%s"):format(k.dict, k.base))
+                pcall(TaskPlayAnim, testPed, k.dict, k.base, 8.0, -8.0, 2500, 1, 0, false, false, false)
+                Wait(2500)
+            end
+        end
+        local rev = Config.TreatRevive
+        if rev and rev.dict and LoadAnimDict(rev.dict) then
+            for i, clip in ipairs(rev.clips or {}) do
+                if (not only) or only == i then
+                    print(("[coi_med_rev] playing %s:%s (%d/%d)"):format(rev.dict, clip, i, #(rev.clips or {})))
+                    pcall(ClearPedTasks, testPed)
+                    Wait(300)
+                    pcall(TaskPlayAnim, testPed, rev.dict, clip, 8.0, -8.0, 3000, 0, 0, false, false, false)
+                    Wait(3200)
+                end
+            end
+        end
+        print("[coi_med_rev] medicanimtest done - cleaning up")
+        pcall(ClearPedTasks, testPed)
+        pcall(DeleteEntity, testPed)
+    end)
 end, false)
 
 RegisterCommand("medictest", function()
