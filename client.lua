@@ -10,6 +10,8 @@ local medicDist = -1
 local medicArrived = false
 local holdStart = 0
 local holding = false
+local deathCam = nil
+local StopDeathCam = nil -- forward declared (defined below, used by ForceRevive/Reset)
 
 -- ============================================================
 -- Helpers
@@ -101,6 +103,8 @@ local function GetSpawnCoordsNearPlayer(playerCoords, baseDist, variance)
 end
 
 local function ForceRevivePlayer()
+    -- restore gameplay cam BEFORE resurrect so player doesn't pop from scripted cam
+    if StopDeathCam then pcall(StopDeathCam) end
     local ped = PlayerPedId()
     ResurrectPed(ped)
     ClearPedTasksImmediately(ped)
@@ -144,6 +148,85 @@ local function ResetState()
     holding = false
     holdStart = 0
     CleanupMedic()
+    if StopDeathCam then pcall(StopDeathCam) end
+end
+
+-- ============================================================
+-- Death cam: elevated wide / multi-angle (RDR2 AFK style)
+-- Keeps the approaching medic in the viewpoint frame.
+-- ============================================================
+StopDeathCam = function()
+    if deathCam ~= nil then
+        pcall(RenderScriptCams, false, false, 0, true, false)
+        pcall(DestroyCam, deathCam, false)
+        deathCam = nil
+    end
+end
+
+local function UpdateDeathCam()
+    local cfg = Config.DeathCam
+    if not cfg or not cfg.Enabled then return end
+    if not isDead then return end
+    local playerPed = PlayerPedId()
+    if not DoesEntityExist(playerPed) then return end
+    local pc = GetEntityCoords(playerPed)
+
+    if deathCam == nil or not DoesCamExist(deathCam) then
+        local okCam, cam = pcall(CreateCam, "DEFAULT_SCRIPTED_CAMERA", true)
+        if not okCam or not cam then return end
+        deathCam = cam
+        pcall(SetCamFov, deathCam, cfg.Fov or 65.0)
+        pcall(SetCamActive, deathCam, true)
+        pcall(RenderScriptCams, true, false, 0, true, false)
+    end
+
+    local height = cfg.Height or 7.0
+    local dist = cfg.Distance or 12.0
+    local cx, cy, cz, lx, ly, lz
+    local t = GetGameTimer()
+
+    local medicOk = cfg.TrackMedic and medicCalled and not medicArrived
+        and medicPed ~= nil and DoesEntityExist(medicPed)
+
+    if medicOk then
+        local mc = GetEntityCoords(medicPed)
+        local dx, dy = mc.x - pc.x, mc.y - pc.y
+        local len = math.sqrt(dx * dx + dy * dy)
+        if len < 0.5 then dx, dy, len = 0.0, 1.0, 1.0 end
+        dx, dy = dx / len, dy / len
+
+        local phase = math.floor(t / (cfg.CycleMs or 7000)) % 3
+        if phase == 0 then
+            -- behind player, looking toward medic: medic walks INTO frame toward you
+            cx = pc.x - dx * dist
+            cy = pc.y - dy * dist
+            cz = pc.z + height
+            lx, ly, lz = (pc.x + mc.x) / 2, (pc.y + mc.y) / 2, (pc.z + mc.z) / 2 + 1.0
+        elseif phase == 1 then
+            -- top-down wide: see full surroundings
+            cx = pc.x + dist * 0.4
+            cy = pc.y - dist * 0.4
+            cz = pc.z + height + 5.0
+            lx, ly, lz = pc.x, pc.y, pc.z + 1.0
+        else
+            -- slow side orbit
+            local ang = (t / 1000.0) * 0.15
+            cx = pc.x + math.cos(ang) * dist
+            cy = pc.y + math.sin(ang) * dist
+            cz = pc.z + height * 0.7
+            lx, ly, lz = pc.x, pc.y, pc.z + 1.0
+        end
+    else
+        -- no medic enroute (or already treating): slow orbit, wide area
+        local ang = (t / 1000.0) * 0.2 + math.floor(t / (cfg.CycleMs or 7000))
+        cx = pc.x + math.cos(ang) * dist
+        cy = pc.y + math.sin(ang) * dist
+        cz = pc.z + height
+        lx, ly, lz = pc.x, pc.y, pc.z + 1.0
+    end
+
+    pcall(SetCamCoord, deathCam, cx, cy, cz)
+    pcall(PointCamAtCoord, deathCam, lx, ly, lz)
 end
 
 -- ============================================================
@@ -377,6 +460,25 @@ CreateThread(function()
 end)
 
 -- ============================================================
+-- Death cam driver (elevated wide / multi-angle)
+-- ============================================================
+CreateThread(function()
+    while true do
+        Wait(400)
+        if Config.DeathCam and Config.DeathCam.Enabled then
+            if isDead then
+                local ok, err = pcall(UpdateDeathCam)
+                if not ok and Config.Debug then
+                    print("[coi_med_rev] deathcam err: " .. tostring(err))
+                end
+            elseif deathCam ~= nil and StopDeathCam then
+                pcall(StopDeathCam)
+            end
+        end
+    end
+end)
+
+-- ============================================================
 -- Hold-W detection + all on-screen UI (runs every frame)
 -- ============================================================
 CreateThread(function()
@@ -448,6 +550,7 @@ end)
 
 -- cleanup on resource stop
 AddEventHandler('onResourceStop', function(resourceName)
+    if StopDeathCam then pcall(StopDeathCam) end
     if GetCurrentResourceName() == resourceName then
         CleanupMedic()
     end
@@ -477,6 +580,8 @@ RegisterCommand("medicdebug", function()
     else
         print("[coi_med_rev] medicPed=nil (no active medic)")
     end
+    print(("[coi_med_rev] deathCam=%s enabled=%s"):format(
+        tostring(deathCam), tostring(Config.DeathCam and Config.DeathCam.Enabled)))
 end, false)
 
 RegisterCommand("medictest", function()

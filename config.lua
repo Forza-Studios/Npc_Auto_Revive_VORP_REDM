@@ -21,6 +21,17 @@ Config.EnrouteTimeoutMs = 90000    -- give up / teleport NPC to player if pathin
 Config.AddBlip = true              -- blip on doctor so you can see him coming even if occluded
 Config.Debug = true                -- F8 prints: model used, spawn coords, exists/visible checks
 
+-- Death cam: elevated wide view so the approaching medic stays in frame.
+-- Like RDR2 AFK cam: cycles angles every CycleMs while dead.
+Config.DeathCam = {
+    Enabled = true,
+    Height = 7.0,        -- cam height above player
+    Distance = 12.0,     -- cam distance from player
+    Fov = 65.0,          -- wider than gameplay (~50) so medic stays in frame
+    CycleMs = 7000,      -- switch angle every 7s (multi-angle cinematic)
+    TrackMedic = true,   -- when medic enroute: frame player+medic instead of pure orbit
+}
+
 -- Doctor-dressed ped models (tried in order, first that loads is used)
 Config.DoctorModels = {
     "u_m_m_valdoctor_01",
