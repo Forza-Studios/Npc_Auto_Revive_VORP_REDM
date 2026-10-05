@@ -81,6 +81,20 @@ local function LoadModel(modelName)
     return nil
 end
 
+local function LoadAnimDict(dict)
+    if not dict then return false end
+    RequestAnimDict(dict)
+    local timeout = GetGameTimer() + 8000
+    while not HasAnimDictLoaded(dict) and GetGameTimer() < timeout do
+        Wait(100)
+    end
+    if HasAnimDictLoaded(dict) then
+        return true
+    end
+    Dbg("anim dict load TIMEOUT: " .. tostring(dict))
+    return false
+end
+
 local function GetSpawnCoordsNearPlayer(playerCoords, baseDist, variance)
     local angle = math.random() * math.pi * 2.0
     local dist = baseDist + (math.random() * variance * 2.0 - variance)
@@ -185,39 +199,54 @@ local function UpdateDeathCam()
     local cx, cy, cz, lx, ly, lz
     local t = GetGameTimer()
 
-    local medicOk = cfg.TrackMedic and medicCalled and not medicArrived
+    -- medic active = enroute OR treating (all angles point at him once called)
+    local medicActive = cfg.TrackMedic and medicCalled
         and medicPed ~= nil and DoesEntityExist(medicPed)
+    local treating = medicActive and (medicArrived or medicDist == 0)
 
-    if medicOk then
+    if medicActive then
         local mc = GetEntityCoords(medicPed)
         local dx, dy = mc.x - pc.x, mc.y - pc.y
         local len = math.sqrt(dx * dx + dy * dy)
         if len < 0.5 then dx, dy, len = 0.0, 1.0, 1.0 end
         dx, dy = dx / len, dy / len
+        -- side vector for orbit shots
+        local sx, sy = -dy, dx
 
-        local phase = math.floor(t / (cfg.CycleMs or 7000)) % 3
+        local phase = math.floor(t / (cfg.CycleMs or 7000)) % 4
         if phase == 0 then
-            -- behind player, looking toward medic: medic walks INTO frame toward you
+            -- ANGLE 1: behind body, medic walks INTO frame toward you (both framed)
             cx = pc.x - dx * dist
             cy = pc.y - dy * dist
             cz = pc.z + height
-            lx, ly, lz = (pc.x + mc.x) / 2, (pc.y + mc.y) / 2, (pc.z + mc.z) / 2 + 1.0
+            lx, ly, lz = mc.x, mc.y, mc.z + 1.0 -- look AT medic
         elseif phase == 1 then
-            -- top-down wide: see full surroundings
-            cx = pc.x + dist * 0.4
-            cy = pc.y - dist * 0.4
-            cz = pc.z + height + 5.0
-            lx, ly, lz = pc.x, pc.y, pc.z + 1.0
+            -- ANGLE 2: tight orbit around MEDIC (medic close-up, body in bg)
+            local cdist = treating and 3.5 or 7.0
+            local cheight = treating and 2.2 or 4.0
+            local ang = (t / 1000.0) * 0.35
+            cx = mc.x + math.cos(ang) * cdist
+            cy = mc.y + math.sin(ang) * cdist
+            cz = mc.z + cheight
+            lx, ly, lz = mc.x, mc.y, mc.z + 1.0 -- look AT medic
+        elseif phase == 2 then
+            -- ANGLE 3: top-down wide framing midpoint (both visible)
+            local mx, my, mz = (pc.x + mc.x) / 2, (pc.y + mc.y) / 2, (pc.z + mc.z) / 2
+            cx = mx + dist * 0.4
+            cy = my - dist * 0.4
+            cz = mz + height + 5.0
+            lx, ly, lz = mc.x, mc.y, mc.z + 1.0 -- look AT medic
         else
-            -- slow side orbit
-            local ang = (t / 1000.0) * 0.15
-            cx = pc.x + math.cos(ang) * dist
-            cy = pc.y + math.sin(ang) * dist
-            cz = pc.z + height * 0.7
-            lx, ly, lz = pc.x, pc.y, pc.z + 1.0
+            -- ANGLE 4: low side track on medic (cinematic, kneel-close during treat)
+            local cdist = treating and 4.0 or 8.0
+            local cheight = treating and 1.8 or 3.0
+            cx = mc.x + sx * cdist - dx * 2.0
+            cy = mc.y + sy * cdist - dy * 2.0
+            cz = mc.z + cheight
+            lx, ly, lz = mc.x, mc.y, mc.z + 1.0 -- look AT medic
         end
     else
-        -- no medic enroute (or already treating): slow orbit, wide area
+        -- no medic yet: slow orbit around body, wide area
         local ang = (t / 1000.0) * 0.2 + math.floor(t / (cfg.CycleMs or 7000))
         cx = pc.x + math.cos(ang) * dist
         cy = pc.y + math.sin(ang) * dist
@@ -343,8 +372,9 @@ AddEventHandler("coi_med_rev:doRevive", function(canRevive)
             medicDist = #(mc - pc)
         end
 
-        -- walk / run to player
-        TaskGoToEntity(medicPed, playerPed, -1, Config.ArriveDistance - 0.5, Config.NpcRunSpeed, 0, 0)
+        -- walk / run to player (stop close to the body, not 2m+ away)
+        local stopDist = math.max(0.5, (Config.ArriveDistance or 1.4) - 0.3)
+        TaskGoToEntity(medicPed, playerPed, -1, stopDist, Config.NpcRunSpeed, 0, 0)
 
         local deadline = GetGameTimer() + Config.EnrouteTimeoutMs
         local lastRetask = GetGameTimer()
@@ -357,7 +387,7 @@ AddEventHandler("coi_med_rev:doRevive", function(canRevive)
             local dist = #(mCoords - pCoords)
             medicDist = dist -- <-- live distance for UI thread
 
-            if dist <= Config.ArriveDistance then
+            if dist <= (Config.ArriveDistance or 1.4) then
                 medicArrived = true
                 break
             end
@@ -365,13 +395,13 @@ AddEventHandler("coi_med_rev:doRevive", function(canRevive)
             -- re-issue goto if ped got stuck (every ~5s)
             if GetGameTimer() - lastRetask > 5000 then
                 lastRetask = GetGameTimer()
-                pcall(TaskGoToEntity, medicPed, playerPed, -1, Config.ArriveDistance - 0.5, Config.NpcRunSpeed, 0, 0)
+                pcall(TaskGoToEntity, medicPed, playerPed, -1, stopDist, Config.NpcRunSpeed, 0, 0)
             end
 
             if GetGameTimer() > deadline then
-                -- teleport doctor close so player is never soft-locked
+                -- teleport doctor CLOSE (kneel range) so player is never soft-locked
                 local pc = GetEntityCoords(playerPed)
-                SetEntityCoords(medicPed, pc.x + 2.0, pc.y + 2.0, pc.z, false, false, false, false)
+                SetEntityCoords(medicPed, pc.x + 1.2, pc.y + 1.2, pc.z, false, false, false, false)
                 medicArrived = true
                 break
             end
@@ -386,22 +416,54 @@ AddEventHandler("coi_med_rev:doRevive", function(canRevive)
 
         if DoesEntityExist(medicPed) then
             ClearPedTasks(medicPed)
-            -- face player, then kneel / inspect (revive scenario animation)
-            TaskTurnPedToFaceEntity(medicPed, playerPed, 2000)
-            Wait(2000)
 
-            local scen = GetHashKey(Config.TreatScenario)
-            TaskStartScenarioInPlace(medicPed, scen, -1, true, false, false, false)
+            -- pull medic kneel-close to the body (fixes "npc too far" stopping gap)
+            do
+                local pc = GetEntityCoords(playerPed)
+                local mc = GetEntityCoords(medicPed)
+                local dx, dy = pc.x - mc.x, pc.y - mc.y
+                local len = math.sqrt(dx * dx + dy * dy)
+                if len < 0.01 then dx, dy, len = 0.0, 1.0, 1.0 end
+                local off = Config.TreatOffset or 1.2
+                local nx = pc.x - (dx / len) * off
+                local ny = pc.y - (dy / len) * off
+                pcall(SetEntityCoords, medicPed, nx, ny, pc.z, false, false, false, false)
+            end
+
+            -- face player, then play crouch-inspect ANIM (no scenario system)
+            TaskTurnPedToFaceEntity(medicPed, playerPed, 1500)
             Wait(1500)
 
-            -- verify scenario started, else try fallback
-            -- (no reliable IsPedUsingScenario native check across builds; just re-apply fallback if needed)
+            local anim = Config.TreatAnim
+            local animOk = false
+            if anim and anim.dict and anim.anim then
+                if LoadAnimDict(anim.dict) then
+                    pcall(TaskPlayAnim, medicPed, anim.dict, anim.anim, 8.0, -8.0, -1, anim.flag or 1, 0, false, false, false)
+                    animOk = true
+                end
+            end
+            -- optional scenario fallback (both nil by default = anim only)
+            if not animOk and Config.TreatScenario then
+                pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenario), -1, true, false, false, false)
+            elseif not animOk and Config.TreatScenarioFallback then
+                pcall(TaskStartScenarioInPlace, medicPed, GetHashKey(Config.TreatScenarioFallback), -1, true, false, false, false)
+            end
+            Wait(1500)
+
             local treatUntil = GetGameTimer() + Config.TreatTimeMs
             while GetGameTimer() < treatUntil and isDead do
                 Wait(500)
                 -- keep medicDist pinned near 0 so UI shows "treating"
                 medicDist = 0
                 if not DoesEntityExist(medicPed) then break end
+                -- keep anim looping (engine can drop it on collision/pathing)
+                if animOk and anim and anim.dict and anim.anim then
+                    local playing = false
+                    pcall(function() playing = IsEntityPlayingAnim(medicPed, anim.dict, anim.anim, 3) end)
+                    if not playing then
+                        pcall(TaskPlayAnim, medicPed, anim.dict, anim.anim, 8.0, -8.0, -1, anim.flag or 1, 0, false, false, false)
+                    end
+                end
             end
 
             ClearPedTasks(medicPed)

@@ -13,7 +13,8 @@ Config.HoldTimeMs = 2000
 -- 25-30m keeps the NPC in view while still feeling like he "comes from town".
 Config.SpawnDistance = 28.0        -- approx distance from player to spawn NPC doctor
 Config.SpawnDistanceVariance = 8.0 -- +/- random variance
-Config.ArriveDistance = 2.5        -- considered "arrived" when within this many meters
+Config.ArriveDistance = 1.4        -- considered "arrived" when within this many meters (kneel-close)
+Config.TreatOffset = 1.2           -- final placement: medic stands this many meters from body
 Config.NpcRunSpeed = 4.0           -- TaskGoToEntity speed (2.0 = walk, 3.0+ = jog/run)
 Config.TreatTimeMs = 6000          -- how long doctor kneels / treats before revive
 Config.DespawnAfterMs = 15000      -- delete NPC this long after revive
@@ -40,10 +41,15 @@ Config.DoctorModels = {
     "cs_creoledoctor",
 }
 
--- Revive scenario played when doctor reaches player
--- WORLD_HUMAN_CROUCH_INSPECT is proven on RedM. Fallback: WORLD_HUMAN_KNEEL
-Config.TreatScenario = "WORLD_HUMAN_CROUCH_INSPECT"
-Config.TreatScenarioFallback = "WORLD_HUMAN_KNEEL"
+-- Revive anim played when doctor reaches player (scenario system disabled)
+Config.TreatScenario = nil
+Config.TreatScenarioFallback = nil
+
+Config.TreatAnim = {
+    dict = "amb_work@world_human_crouch_inspect@male_a@idle_a",
+    anim = "idle_a",
+    flag = 1
+}
 
 -- Revive
 Config.ReviveFee = 0.0 -- set > 0 to charge via vorp_core (0 = free)
